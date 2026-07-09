@@ -1,4 +1,5 @@
 import os, json, time
+from datetime import datetime, timezone
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
@@ -39,12 +40,20 @@ def fetch_listings():
     return out
 
 def notify(l):
-    lines = [x for x in (l["address"], f"**{l['price']}**" if l["price"] else None) if x]
+    fields = []
+    if l["address"]:
+        fields.append({"name": "Adresse", "value": l["address"], "inline": False})
+    if l["price"]:
+        fields.append({"name": "Loyer", "value": l["price"], "inline": True})
+    fields.append({"name": "Annonce", "value": f"[Voir le logement]({l['url']})", "inline": True})
+
     payload = {"embeds": [{
-        "title": l["title"] or "Nouveau logement CROUS",
+        "title": f"🏠 {l['title']}" if l["title"] else "Nouveau logement CROUS",
         "url": l["url"],
-        "description": "\n".join(lines) or "Nouveau logement disponible",
         "color": 0x0f8000,
+        "fields": fields,
+        "footer": {"text": "CROUS · nouvelle annonce détectée"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }]}
     for attempt in range(5):
         r = requests.post(WEBHOOK, json=payload, timeout=30)
