@@ -1,4 +1,4 @@
-import os, json
+import os, json, time
 from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
@@ -13,7 +13,7 @@ def load_seen():
         with open(STATE_FILE) as f:
             return set(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
-        return None   # None = first run ever
+        return None
 
 def fetch_listings():
     r = requests.get(SEARCH_URL, headers=HEADERS, timeout=30)
@@ -26,7 +26,7 @@ def fetch_listings():
             continue
         href = a.get("href", "")
         url  = urljoin(r.url, href)
-        listing_id = href.rstrip("/").split("/")[-1] or url  # the /logements/<id>
+        listing_id = href.rstrip("/").split("/")[-1] or url
         price = card.find("p", class_="fr-badge")
         desc  = card.find("p", class_="fr-card__desc")
         out.append({
@@ -40,18 +40,28 @@ def fetch_listings():
 
 def notify(l):
     lines = [x for x in (l["address"], f"**{l['price']}**" if l["price"] else None) if x]
-    requests.post(WEBHOOK, json={"embeds": [{
+    payload = {"embeds": [{
         "title": l["title"] or "Nouveau logement CROUS",
         "url": l["url"],
         "description": "\n".join(lines) or "Nouveau logement disponible",
         "color": 0x0f8000,
-    }]}, timeout=30).raise_for_status()
+    }]}
+    for attempt in range(5):
+        r = requests.post(WEBHOOK, json=payload, timeout=30)
+        if r.status_code == 429:
+            wait = r.json().get("retry_after", 1) + 0.5
+            print(f"Rate limited, waiting {wait}s")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return
+    raise RuntimeError(f"Gave up notifying after retries: {l['title']}")
 
 def main():
     listings = fetch_listings()
     current  = {l["id"] for l in listings}
     seen     = load_seen()
-    if seen is None:                       # first run: remember what's there, ping nothing
+    if seen is None:
         json.dump(sorted(current), open(STATE_FILE, "w"))
         print(f"Seeded {len(current)} listings, no pings.")
         return
@@ -63,7 +73,9 @@ def main():
         if l["id"] in new:
             notify(l)
             print("Notified:", l["title"])
-    json.dump(sorted(seen | current), open(STATE_FILE, "w"))
+            seen.add(l["id"])
+            json.dump(sorted(seen | current), open(STATE_FILE, "w"))
+            time.sleep(1.2)
 
 if __name__ == "__main__":
     main()
