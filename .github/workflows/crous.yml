@@ -1,8 +1,11 @@
-name: CROUS watcher
+# Scheduled polling has moved to a DigitalOcean droplet (see DEPLOY.md) for
+# seconds-level notification latency, which GitHub Actions cron (1-minute
+# floor, often several minutes late in practice) can't provide. This workflow
+# is kept as a manual one-off backup check only, so it doesn't run
+# concurrently with the droplet and cause duplicate notifications.
+name: CROUS watcher (manual backup)
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -30,6 +33,7 @@ jobs:
         env:
           SEARCH_URL: ${{ secrets.SEARCH_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_ONCE: "true"
         run: python bot.py
 
       - name: Save state

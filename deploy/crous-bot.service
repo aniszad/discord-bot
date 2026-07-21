@@ -1,0 +1,16 @@
+[Unit]
+Description=CROUS Lille housing notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=crous-bot
+WorkingDirectory=/opt/crous-bot
+EnvironmentFile=/opt/crous-bot/.env
+ExecStart=/opt/crous-bot/venv/bin/python /opt/crous-bot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
