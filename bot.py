@@ -37,7 +37,10 @@ def load_seen():
     r.raise_for_status()
     data = r.json()
     content = base64.b64decode(data["content"]).decode()
-    return json.loads(content), data["sha"]
+    parsed = json.loads(content)
+    if isinstance(parsed, list):
+        return {}, data["sha"]
+    return parsed, data["sha"]
 
 def save_seen(state, sha):
     content = base64.b64encode(json.dumps(state).encode()).decode()
