@@ -4,12 +4,23 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-SEARCH_URL     = os.environ["SEARCH_URL"]
-WEBHOOK        = os.environ["DISCORD_WEBHOOK_URL"]
+WATCHES = [
+    {
+        "name": "Lille",
+        "search_url": "https://trouverunlogement.lescrous.fr/tools/47/search?bounds=2.895507971002203_50.84106942862877_3.2793428098693904_50.52434116637029&locationName=Lille",
+        "webhook": os.environ["DISCORD_WEBHOOK_LILLE"],
+    },
+    {
+        "name": "France",
+        "search_url": "https://trouverunlogement.lescrous.fr/tools/47/search?bounds=-3.641053695014068_52.908902047770255_8.641661148735935_42.16340342422403&locationName=Lille",
+        "webhook": os.environ["DISCORD_WEBHOOK_FRANCE"],
+    },
+]
+
 GITHUB_TOKEN   = os.environ["GITHUB_TOKEN"]
 GITHUB_REPO    = os.environ["GITHUB_REPO"]
 GITHUB_BRANCH  = os.environ.get("GITHUB_BRANCH", "main")
-POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
+POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL_SECONDS", "20"))
 STATE_FILE     = "seen.json"
 HEADERS        = {"User-Agent": "Mozilla/5.0 (crous-notifier)"}
 
@@ -22,14 +33,14 @@ GITHUB_HEADERS = {
 def load_seen():
     r = requests.get(GITHUB_API, headers=GITHUB_HEADERS, params={"ref": GITHUB_BRANCH}, timeout=30)
     if r.status_code == 404:
-        return None, None
+        return {}, None
     r.raise_for_status()
     data = r.json()
     content = base64.b64decode(data["content"]).decode()
-    return set(json.loads(content)), data["sha"]
+    return json.loads(content), data["sha"]
 
-def save_seen(ids, sha):
-    content = base64.b64encode(json.dumps(sorted(ids)).encode()).decode()
+def save_seen(state, sha):
+    content = base64.b64encode(json.dumps(state).encode()).decode()
     payload = {"message": "update state", "content": content, "branch": GITHUB_BRANCH}
     if sha:
         payload["sha"] = sha
@@ -37,8 +48,8 @@ def save_seen(ids, sha):
     r.raise_for_status()
     return r.json()["content"]["sha"]
 
-def fetch_listings():
-    r = requests.get(SEARCH_URL, headers=HEADERS, timeout=30)
+def fetch_listings(search_url):
+    r = requests.get(search_url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     out = []
@@ -60,24 +71,24 @@ def fetch_listings():
         })
     return out
 
-def notify(l):
+def notify(listing, webhook):
     fields = []
-    if l["address"]:
-        fields.append({"name": "Adresse", "value": l["address"], "inline": False})
-    if l["price"]:
-        fields.append({"name": "Loyer", "value": l["price"], "inline": True})
-    fields.append({"name": "Annonce", "value": f"[Voir le logement]({l['url']})", "inline": True})
+    if listing["address"]:
+        fields.append({"name": "Adresse", "value": listing["address"], "inline": False})
+    if listing["price"]:
+        fields.append({"name": "Loyer", "value": listing["price"], "inline": True})
+    fields.append({"name": "Annonce", "value": f"[Voir le logement]({listing['url']})", "inline": True})
 
     payload = {"embeds": [{
-        "title": f"🏠 {l['title']}" if l["title"] else "Nouveau logement CROUS",
-        "url": l["url"],
+        "title": f"🏠 {listing['title']}" if listing["title"] else "Nouveau logement CROUS",
+        "url": listing["url"],
         "color": 0x0f8000,
         "fields": fields,
         "footer": {"text": "CROUS · nouvelle annonce détectée"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]}
     for attempt in range(5):
-        r = requests.post(WEBHOOK, json=payload, timeout=30)
+        r = requests.post(webhook, json=payload, timeout=30)
         if r.status_code == 429:
             wait = r.json().get("retry_after", 1) + 0.5
             print(f"Rate limited, waiting {wait}s")
@@ -85,34 +96,39 @@ def notify(l):
             continue
         r.raise_for_status()
         return
-    raise RuntimeError(f"Gave up notifying after retries: {l['title']}")
+    raise RuntimeError(f"Gave up notifying after retries: {listing['title']}")
 
-def check_once(seen, sha):
-    listings = fetch_listings()
-    current  = {l["id"] for l in listings}
-    if seen is None:
-        sha = save_seen(current, sha)
-        print(f"Seeded {len(current)} listings, no pings.")
-        return current, sha
+def check_watch(watch, state, sha):
+    name = watch["name"]
+    listings = fetch_listings(watch["search_url"])
+    current = {l["id"] for l in listings}
+    seen = set(state.get(name, []))
+    if not seen:
+        state[name] = sorted(current)
+        sha = save_seen(state, sha)
+        print(f"[{name}] Seeded {len(current)} listings, no pings.")
+        return state, sha
     new = current - seen
     if not new:
-        print("No new listings.")
-        return seen, sha
+        print(f"[{name}] No new listings.")
+        return state, sha
     for l in listings:
         if l["id"] in new:
-            notify(l)
-            print("Notified:", l["title"])
+            notify(l, watch["webhook"])
+            print(f"[{name}] Notified: {l['title']}")
             seen.add(l["id"])
-            sha = save_seen(seen | current, sha)
-    return seen | current, sha
+            state[name] = sorted(seen | current)
+            sha = save_seen(state, sha)
+    return state, sha
 
 def main():
-    seen, sha = load_seen()
+    state, sha = load_seen()
     while True:
-        try:
-            seen, sha = check_once(seen, sha)
-        except Exception as e:
-            print(f"Error during check: {e}")
+        for watch in WATCHES:
+            try:
+                state, sha = check_watch(watch, state, sha)
+            except Exception as e:
+                print(f"[{watch['name']}] Error: {e}")
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
