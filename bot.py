@@ -24,6 +24,7 @@ POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL_SECONDS", "20"))
 STATE_FILE     = "seen.json"
 HEADERS        = {"User-Agent": "Mozilla/5.0 (crous-notifier)"}
 
+ALERT_WEBHOOK  = os.environ.get("DISCORD_WEBHOOK_ALERTS", os.environ["DISCORD_WEBHOOK_LILLE"])
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}"
 GITHUB_HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -51,9 +52,24 @@ def save_seen(state, sha):
     r.raise_for_status()
     return r.json()["content"]["sha"]
 
+def send_alert(message):
+    payload = {"embeds": [{
+        "title": "CROUS Bot Alert",
+        "description": message,
+        "color": 0xff0000,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }]}
+    try:
+        requests.post(ALERT_WEBHOOK, json=payload, timeout=10)
+    except Exception:
+        pass
+
+consecutive_failures = {}
+
 def fetch_listings(search_url):
     r = requests.get(search_url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.reason}")
     soup = BeautifulSoup(r.text, "html.parser")
     out = []
     for card in soup.find_all("div", class_="fr-card"):
@@ -104,6 +120,7 @@ def notify(listing, webhook):
 def check_watch(watch, state, sha):
     name = watch["name"]
     listings = fetch_listings(watch["search_url"])
+    consecutive_failures[name] = 0
     current = {l["id"] for l in listings}
     seen = set(state.get(name, []))
     if not seen:
@@ -131,7 +148,11 @@ def main():
             try:
                 state, sha = check_watch(watch, state, sha)
             except Exception as e:
-                print(f"[{watch['name']}] Error: {e}")
+                name = watch["name"]
+                consecutive_failures[name] = consecutive_failures.get(name, 0) + 1
+                print(f"[{name}] Error ({consecutive_failures[name]}): {e}")
+                if consecutive_failures[name] == 3:
+                    send_alert(f"**[{name}]** down for 3 consecutive checks.\nError: `{e}`")
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
