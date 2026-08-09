@@ -4,13 +4,14 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-SEARCH_URL    = os.environ["SEARCH_URL"]
-WEBHOOK       = os.environ["DISCORD_WEBHOOK_URL"]
-GITHUB_TOKEN  = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO   = os.environ["GITHUB_REPO"]  # "owner/repo"
-GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
-STATE_FILE    = "seen.json"
-HEADERS       = {"User-Agent": "Mozilla/5.0 (crous-notifier)"}
+SEARCH_URL     = os.environ["SEARCH_URL"]
+WEBHOOK        = os.environ["DISCORD_WEBHOOK_URL"]
+GITHUB_TOKEN   = os.environ["GITHUB_TOKEN"]
+GITHUB_REPO    = os.environ["GITHUB_REPO"]
+GITHUB_BRANCH  = os.environ.get("GITHUB_BRANCH", "main")
+POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
+STATE_FILE     = "seen.json"
+HEADERS        = {"User-Agent": "Mozilla/5.0 (crous-notifier)"}
 
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}"
 GITHUB_HEADERS = {
@@ -19,8 +20,6 @@ GITHUB_HEADERS = {
 }
 
 def load_seen():
-    # Heroku's filesystem is ephemeral, so state lives in the GitHub repo
-    # instead of on disk. Returns (seen_ids_or_None, sha_or_None).
     r = requests.get(GITHUB_API, headers=GITHUB_HEADERS, params={"ref": GITHUB_BRANCH}, timeout=30)
     if r.status_code == 404:
         return None, None
@@ -88,25 +87,33 @@ def notify(l):
         return
     raise RuntimeError(f"Gave up notifying after retries: {l['title']}")
 
-def main():
+def check_once(seen, sha):
     listings = fetch_listings()
     current  = {l["id"] for l in listings}
-    seen, sha = load_seen()
     if seen is None:
-        save_seen(current, sha)
+        sha = save_seen(current, sha)
         print(f"Seeded {len(current)} listings, no pings.")
-        return
+        return current, sha
     new = current - seen
     if not new:
         print("No new listings.")
-        return
+        return seen, sha
     for l in listings:
         if l["id"] in new:
             notify(l)
             print("Notified:", l["title"])
             seen.add(l["id"])
             sha = save_seen(seen | current, sha)
-            time.sleep(1.2)
+    return seen | current, sha
+
+def main():
+    seen, sha = load_seen()
+    while True:
+        try:
+            seen, sha = check_once(seen, sha)
+        except Exception as e:
+            print(f"Error during check: {e}")
+        time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
     main()
