@@ -24,6 +24,11 @@ POLL_INTERVAL  = int(os.environ.get("POLL_INTERVAL_SECONDS", "20"))
 STATE_FILE     = "seen.json"
 HEADERS        = {"User-Agent": "Mozilla/5.0 (crous-notifier)"}
 
+FETCH_RETRIES              = int(os.environ.get("FETCH_RETRIES", "2"))
+FETCH_RETRY_DELAY_SECONDS  = int(os.environ.get("FETCH_RETRY_DELAY_SECONDS", "2"))
+FAILURE_ALERT_SECONDS      = int(os.environ.get("FAILURE_ALERT_MINUTES", "5")) * 60
+HEALTHCHECK_INTERVAL_SECONDS = int(os.environ.get("HEALTHCHECK_INTERVAL_HOURS", "3")) * 3600
+
 ALERT_WEBHOOK  = os.environ.get("DISCORD_WEBHOOK_ALERTS", os.environ["DISCORD_WEBHOOK_LILLE"])
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}"
 GITHUB_HEADERS = {
@@ -52,11 +57,11 @@ def save_seen(state, sha):
     r.raise_for_status()
     return r.json()["content"]["sha"]
 
-def send_alert(message):
+def send_alert(message, color=0xff0000, title="CROUS Bot Alert"):
     payload = {"embeds": [{
-        "title": "CROUS Bot Alert",
+        "title": title,
         "description": message,
-        "color": 0xff0000,
+        "color": color,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }]}
     try:
@@ -64,12 +69,36 @@ def send_alert(message):
     except Exception:
         pass
 
+def send_health_check():
+    now = time.time()
+    lines = []
+    for watch in WATCHES:
+        name = watch["name"]
+        ts = last_success.get(name)
+        if ts is None:
+            lines.append(f"⚠️ **{name}**: no successful fetch yet")
+        else:
+            lines.append(f"✅ **{name}**: last successful fetch {int(now - ts)}s ago")
+    send_alert("\n".join(lines), color=0x2ecc71, title="CROUS Bot Health Check")
+
 consecutive_failures = {}
+last_success = {}
+alerted = {}
 
 def fetch_listings(search_url):
-    r = requests.get(search_url, headers=HEADERS, timeout=30)
-    if r.status_code != 200:
-        raise RuntimeError(f"HTTP {r.status_code}: {r.reason}")
+    last_exc = None
+    for attempt in range(FETCH_RETRIES + 1):
+        try:
+            r = requests.get(search_url, headers=HEADERS, timeout=30)
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}: {r.reason}")
+            break
+        except (RuntimeError, requests.RequestException) as e:
+            last_exc = e
+            if attempt < FETCH_RETRIES:
+                time.sleep(FETCH_RETRY_DELAY_SECONDS)
+    else:
+        raise last_exc
     soup = BeautifulSoup(r.text, "html.parser")
     out = []
     for card in soup.find_all("div", class_="fr-card"):
@@ -120,6 +149,10 @@ def notify(listing, webhook):
 def check_watch(watch, state, sha):
     name = watch["name"]
     listings = fetch_listings(watch["search_url"])
+    last_success[name] = time.time()
+    if alerted.get(name):
+        send_alert(f"**[{name}]** recovered — fetching normally again.", color=0x2ecc71)
+        alerted[name] = False
     consecutive_failures[name] = 0
     current = {l["id"] for l in listings}
     seen = set(state.get(name, []))
@@ -143,6 +176,11 @@ def check_watch(watch, state, sha):
 
 def main():
     state, sha = load_seen()
+    start = time.time()
+    for watch in WATCHES:
+        last_success.setdefault(watch["name"], start)
+    last_healthcheck = start
+
     while True:
         for watch in WATCHES:
             try:
@@ -150,9 +188,16 @@ def main():
             except Exception as e:
                 name = watch["name"]
                 consecutive_failures[name] = consecutive_failures.get(name, 0) + 1
-                print(f"[{name}] Error ({consecutive_failures[name]}): {e}")
-                if consecutive_failures[name] == 3:
-                    send_alert(f"**[{name}]** down for 3 consecutive checks.\nError: `{e}`")
+                downtime = time.time() - last_success.get(name, start)
+                print(f"[{name}] Error ({consecutive_failures[name]}, down {int(downtime)}s): {e}")
+                if downtime >= FAILURE_ALERT_SECONDS and not alerted.get(name):
+                    send_alert(f"**[{name}]** down for {int(downtime)}s (no successful fetch since).\nLatest error: `{e}`")
+                    alerted[name] = True
+
+        if time.time() - last_healthcheck >= HEALTHCHECK_INTERVAL_SECONDS:
+            send_health_check()
+            last_healthcheck = time.time()
+
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
